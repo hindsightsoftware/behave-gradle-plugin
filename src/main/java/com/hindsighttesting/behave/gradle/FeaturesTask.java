@@ -9,9 +9,7 @@ import java.io.File;
 import java.io.FileOutputStream;
 import java.io.IOException;
 import java.io.InputStream;
-import java.net.MalformedURLException;
-import java.net.URL;
-import java.net.URLConnection;
+import java.net.*;
 import java.nio.charset.StandardCharsets;
 import java.util.Base64;
 
@@ -23,9 +21,12 @@ public class FeaturesTask extends DefaultTask {
     private String password;
     private boolean includeManual;
     private String destinationDir;
-    private String httpProxyAddress;
-    private String httpProxyUsername;
-    private String httpProxyPassword;
+    private String httpProxyAddress = "";
+    private String httpProxyPort = "";
+    private String httpProxyUsername = "";
+    private String httpProxyPassword = "";
+    private boolean useProxy = false;
+    private boolean useProxyAuth = false;
 
     @TaskAction
     void doTask() {
@@ -35,25 +36,51 @@ public class FeaturesTask extends DefaultTask {
         new File(filePath).mkdirs();
         File features = new File(filePath + "/features.zip");
 
-        try {
-            downloadFile(urlPath, features);
-        } catch (MalformedURLException e) {
-            e.printStackTrace();
+        if (httpProxyAddress.isEmpty() || httpProxyPort.isEmpty()) {
+            useProxy = true;
         }
 
+        if (httpProxyUsername.isEmpty() || httpProxyPassword.isEmpty()) {
+            useProxyAuth = true;
+        }
+
+        downloadFile(urlPath, features);
         unzipFeatures(features);
         removeZip(features);
     }
 
-    public void downloadFile(String urlPath, File features) throws MalformedURLException {
-        URL url = new URL(urlPath);
+    void downloadFile(String urlPath, File features) {
+        URL url = null;
 
         try {
-            URLConnection conn = url.openConnection();
-            String encoded = Base64.getEncoder().encodeToString((username + ":" + password).getBytes(StandardCharsets.UTF_8));
-            conn.setRequestProperty("Authorization", "Basic " + encoded);
-            InputStream in = conn.getInputStream();
+            url = new URL(urlPath);
+        } catch (MalformedURLException e) {
+            System.out.println("URL is not valid");
+            e.printStackTrace();
+            System.exit(1);
+        }
 
+        HttpURLConnection connection = null;
+
+        try {
+            connection = (HttpURLConnection) url.openConnection();
+
+            if (useProxy) {
+                System.setProperty("http.proxyHost", httpProxyAddress);
+                System.setProperty("http.proxyPort", httpProxyPort);
+                System.setProperty("https.proxyHost", httpProxyAddress);
+                System.setProperty("https.proxyPort", httpProxyPort);
+                if (useProxyAuth) {
+                    String encoded = Base64.getEncoder().encodeToString((httpProxyUsername + ":" + httpProxyPassword).getBytes(StandardCharsets.UTF_8));
+                    connection.setRequestProperty("Proxy-Authorization", "Basic " + encoded);
+                    Authenticator.setDefault(new ProxyAuth(httpProxyUsername, httpProxyPassword));
+                }
+            }
+
+            String encoded = Base64.getEncoder().encodeToString((username + ":" + password).getBytes(StandardCharsets.UTF_8));
+            connection.setRequestProperty("Authorization", "Basic " + encoded);
+
+            InputStream in = connection.getInputStream();
             FileOutputStream out = new FileOutputStream(features.getAbsolutePath());
 
             byte[] b = new byte[1024];
@@ -66,20 +93,48 @@ public class FeaturesTask extends DefaultTask {
             out.close();
             in.close();
         } catch (IOException e) {
+            switch(getResponseCode(connection)) {
+                case 401:
+                    System.out.println("Username or password incorrect");
+                    break;
+                case 403:
+                    System.out.println("Too many login failures. Please try again later");
+                    break;
+                case 404:
+                    System.out.println("Project cannot be found");
+                    break;
+                case 405:
+                case 406:
+                    System.out.println("The version of Behave is not compatible with this version of the plugin");
+                    break;
+                default:
+                    System.out.println("Error downloading features");
+            }
             e.printStackTrace();
+            System.exit(1);
         }
     }
 
-    public void unzipFeatures(File features) {
+    int getResponseCode(HttpURLConnection connection) {
+        try {
+            return connection.getResponseCode();
+        } catch(IOException e) {
+            return 500;
+        }
+    }
+
+    void unzipFeatures(File features) {
         try {
             ZipFile zipFile = new ZipFile(features.getAbsolutePath());
             zipFile.extractAll(features.getParent());
         } catch (ZipException e) {
+            System.out.println("Error unzipping features");
             e.printStackTrace();
+            System.exit(1);
         }
     }
 
-    public void removeZip(File features) {
+    void removeZip(File features) {
         features.delete();
     }
 
@@ -141,6 +196,14 @@ public class FeaturesTask extends DefaultTask {
         this.httpProxyAddress = httpProxyAddress;
     }
 
+    public String getHttpProxyPort() {
+        return httpProxyPort;
+    }
+
+    public void setHttpProxyPort(String httpProxyPort) {
+        this.httpProxyPort = httpProxyPort;
+    }
+
     public String getHttpProxyUsername() {
         return httpProxyUsername;
     }
@@ -156,4 +219,19 @@ public class FeaturesTask extends DefaultTask {
     public void setHttpProxyPassword(String httpProxyPassword) {
         this.httpProxyPassword = httpProxyPassword;
     }
+
+    /* Proxy Authenticator class */
+
+    public class ProxyAuth extends Authenticator {
+        private PasswordAuthentication auth;
+
+        private ProxyAuth(String user, String password) {
+            auth = new PasswordAuthentication(user, password == null ? new char[]{} : password.toCharArray());
+        }
+
+        protected PasswordAuthentication getPasswordAuthentication() {
+            return auth;
+        }
+    }
 }
+
